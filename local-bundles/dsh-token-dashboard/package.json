@@ -1,0 +1,31 @@
+{
+  "name": "dsh-token-dashboard",
+  "version": "0.1.0",
+  "description": "Token usage dashboard for DeepSeek Harness: per-session and overall cache-hit/cache-miss/output token statistics from the durable session logs. Read-only; no cost figures.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "./lib/index.js",
+  "files": [
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  }
+}

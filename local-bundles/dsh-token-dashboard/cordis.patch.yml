@@ -1,0 +1,6 @@
+# Token usage dashboard bundle: mounts the host aggregation plugin.
+# The browser half rides the dsh.client manifest and is served by the
+# client module system; only the host half needs a Loader row.
+- insert:
+    - id: token-dashboard
+      name: dsh-token-dashboard
