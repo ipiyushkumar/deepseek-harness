@@ -469,21 +469,18 @@ window.__ModuleLoader__.load({
 		}
 
 		// ────────────────────────────────────────────────────────────
-		// 3. COMPOSER DOCK — compact quota under the input
+		// 3. STATS LINE — compact quota alongside turns/steps/LLM time
 		// ────────────────────────────────────────────────────────────
 
-		function ComposerDock(props) {
-			const [usage, setUsage] = useState(() => props.overview?.opencodeUsage || null);
+		function StatsLineQuota() {
+			const [usage, setUsage] = useState(null);
 			useEffect(() => {
-				if (props.overview?.opencodeUsage) return;
 				let alive = true;
 				fetchOverview().then((v) => { if (alive && v?.opencodeUsage) setUsage(v.opencodeUsage); });
 				return () => { alive = false; };
 			}, []);
 			if (!usage) return null;
-			const maxPct = Math.max(usage.rolling?.percent || 0, usage.weekly?.percent || 0, usage.monthly?.percent || 0);
-			return jsxs("div", { style: { display: "flex", alignItems: "center", gap: 16, padding: "4px 12px", fontSize: 11, color: "#999" }, children: [
-				jsx("span", { style: { color: "#666", fontWeight: 500 }, children: "OC Go" }),
+			return jsxs("span", { style: { display: "inline-flex", alignItems: "center", gap: 8, fontSize: 11, color: "#888" }, children: [
 				jsx(MiniBar, { percent: usage.rolling?.percent, label: "5h" }),
 				jsx(MiniBar, { percent: usage.weekly?.percent, label: "wk" }),
 				jsx(MiniBar, { percent: usage.monthly?.percent, label: "mo" }),
@@ -506,10 +503,10 @@ window.__ModuleLoader__.load({
 				name: "settings.section", id: "opencode-quotas", order: 65, label: "OpenCode Quotas"
 			}, OpenCodeQuotasSection));
 
-			// Composer dock: compact quota display
+			// Stats line: compact quota alongside turns/steps/LLM time
 			ctx.slots.inject("conversation.composer.dock", () => ctx.slots.register({
-				name: "conversation.composer.dock", id: "token-dashboard-dock", order: 100, label: "OpenCode Quotas"
-			}, ComposerDock));
+				name: "conversation.composer.dock", id: "token-dashboard-stats", order: 1, label: "OC Quotas"
+			}, StatsLineQuota));
 		}
 
 		exports.apply = apply;
@@ -517,7 +514,7 @@ window.__ModuleLoader__.load({
 		exports.TokenUsageSection = TokenUsageSection;
 		exports.DashboardView = DashboardView;
 		exports.OpenCodeQuotasSection = OpenCodeQuotasSection;
-		exports.ComposerDock = ComposerDock;
+		exports.StatsLineQuota = StatsLineQuota;
 		return module.exports;
 	}
 });
