@@ -46,10 +46,7 @@ const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
 // ────────────────────────────────────────────────────────────────
 
 /**
- * Decode one concatenated-frames zstd buffer. Frame boundaries are found by
- * scanning for the magic; a false magic match inside compressed payload shows
- * up as a decompress failure, and that segment merges forward until decoding
- * succeeds.
+ * Decode one concatenated-frames zstd buffer.
  * @param buffer - raw file bytes.
  * @returns the decompressed UTF-8 text.
  */
@@ -69,9 +66,6 @@ export function decodeMultiFrameZstd(buffer) {
 				parts.push(zstdDecompressSync(buffer.subarray(starts[s], end)));
 				break;
 			} catch (error) {
-				// A failed segment means the boundary guess was wrong (magic
-				// bytes inside payload) or trailing garbage; merging the next
-				// candidate boundary re-aligns the frame.
 				if (end < buffer.length) {
 					const next = starts.findIndex((value) => value > end);
 					end = next === -1 ? buffer.length : starts[next];
@@ -125,9 +119,6 @@ function utcDay(time) {
 
 /**
  * Fold one session log's event stream into per-session usage totals.
- * See the module doc for the accounting rules this implements.
- * @param text - decompressed JSONL text.
- * @param seed - `{id, cwd}` from the file path (event values win when present).
  * @returns the per-session aggregate, or null when the log carries no usage.
  */
 export function foldSessionLog(text, seed) {
@@ -135,10 +126,9 @@ export function foldSessionLog(text, seed) {
 		id: seed.id, cwd: seed.cwd, title: undefined, createdAt: undefined,
 		buckets: zeroBuckets(), steps: 0,
 		byModel: new Map(), byDay: new Map(),
+		dayModels: new Map(), // day -> Map<model, buckets>
 		firstTs: undefined, lastTs: undefined,
-		/** (turn,step) -> sample, so a later assistant/message replaces it. */
 		pending: new Map(),
-		/** Latest request/header attribution. */
 		attribution: { provider: undefined, model: undefined },
 	};
 	for (const line of text.split('\n')) {
@@ -177,9 +167,6 @@ export function foldSessionLog(text, seed) {
 			state.pending.set(stepKey, { buckets, time: typeof event.time === 'number' ? event.time : undefined });
 			continue;
 		}
-		// assistant/message: the committed-step sample. Its own usage (when
-		// present) replaces the streamed chunk sample; its message source is
-		// the strongest model attribution for this step.
 		const message = data.message;
 		const source = message !== null && typeof message === 'object' ? message.source : undefined;
 		if (source !== null && typeof source === 'object') {
@@ -196,8 +183,6 @@ export function foldSessionLog(text, seed) {
 		state.pending.delete(stepKey);
 		commitSample(state, stepKey, committed);
 	}
-	// Usage chunks whose request never committed (failure, interruption)
-	// still count: flush whatever remains pending.
 	for (const [stepKey, sample] of state.pending) commitSample(state, stepKey, sample);
 	state.pending = undefined;
 	if (state.steps === 0) return null;
@@ -206,6 +191,7 @@ export function foldSessionLog(text, seed) {
 		buckets: state.buckets, steps: state.steps,
 		byModel: Object.fromEntries(state.byModel),
 		byDay: Object.fromEntries(state.byDay),
+		dayModels: Object.fromEntries([...state.dayModels].map(([day, m]) => [day, Object.fromEntries(m)])),
 		firstTs: state.firstTs, lastTs: state.lastTs,
 	};
 }
@@ -216,6 +202,7 @@ function commitSample(state, stepKey, sample) {
 	const time = sample.time ?? state.createdAt;
 	state.steps += 1;
 	addBuckets(state.buckets, buckets);
+	const model = state.attribution.model ?? 'unknown';
 	if (time !== undefined) {
 		if (state.firstTs === undefined || time < state.firstTs) state.firstTs = time;
 		if (state.lastTs === undefined || time > state.lastTs) state.lastTs = time;
@@ -224,8 +211,13 @@ function commitSample(state, stepKey, sample) {
 		if (dayBucket === undefined) state.byDay.set(day, dayBucket = { day, ...zeroBuckets(), steps: 0 });
 		addBuckets(dayBucket, buckets);
 		dayBucket.steps += 1;
+		// Per-day-per-model breakdown
+		let dayModelMap = state.dayModels.get(day);
+		if (dayModelMap === undefined) state.dayModels.set(day, dayModelMap = new Map());
+		let dayModelBucket = dayModelMap.get(model);
+		if (dayModelBucket === undefined) dayModelMap.set(model, dayModelBucket = zeroBuckets());
+		addBuckets(dayModelBucket, buckets);
 	}
-	const model = state.attribution.model ?? 'unknown';
 	let modelBucket = state.byModel.get(model);
 	if (modelBucket === undefined) {
 		state.byModel.set(model, modelBucket = { model, provider: state.attribution.provider, ...zeroBuckets(), steps: 0 });
@@ -238,18 +230,11 @@ function commitSample(state, stepKey, sample) {
 // Session discovery + scan cache
 // ────────────────────────────────────────────────────────────────
 
-/** Absolute harness home: $DSH_HOME, else ~/.dsh (matches dsh-home-paths). */
 function dshHome() {
 	const fromEnv = process.env.DSH_HOME;
 	return fromEnv !== undefined && fromEnv.trim().length > 0 ? fromEnv : join(homedir(), '.dsh');
 }
 
-/**
- * Enumerate every persisted session log with its stat signature.
- * Layout: `$DSH_HOME/sessions/<workspace-dir>/<session-id>/session.jsonl[.zstd]`.
- * @param home - harness home.
- * @returns `{file, workspace, id, size, mtimeMs}` entries.
- */
 export function listSessionLogs(home) {
 	const root = join(home, 'sessions');
 	const out = [];
@@ -278,18 +263,10 @@ export function listSessionLogs(home) {
 	return out;
 }
 
-/** Cache entry signature for one log file. */
 function signatureOf(entry) {
 	return `${entry.size}:${Math.round(entry.mtimeMs)}`;
 }
 
-/**
- * Aggregate every session log, using the durable scan cache to skip files
- * whose (size, mtime) signature is unchanged.
- * @param home - harness home.
- * @param cacheFile - scan-cache path.
- * @returns the overview payload.
- */
 export function buildOverview(home, cacheFile) {
 	let cache = { files: {}, sessions: {} };
 	try { cache = JSON.parse(readFileSync(cacheFile, 'utf8')); } catch (error) {
@@ -312,7 +289,7 @@ export function buildOverview(home, cacheFile) {
 				const raw = readFileSync(entry.file);
 				text = entry.file.endsWith('.zstd') ? decodeMultiFrameZstd(raw) : raw.toString('utf8');
 			} catch {
-				continue; // Unreadable/undecodable log: skip rather than fail the overview.
+				continue;
 			}
 			aggregate = foldSessionLog(text, { id: entry.id, cwd: undefined });
 			if (aggregate === null) aggregate = { id: entry.id, empty: true };
@@ -328,7 +305,7 @@ export function buildOverview(home, cacheFile) {
 			mkdirSync(join(cacheFile, '..'), { recursive: true });
 			writeFileSync(cacheFile, JSON.stringify({ files: nextFiles, sessions: Object.fromEntries(sessions.map((s) => [s.id, s])) }));
 		} catch {
-			// Cache write is best-effort; the overview is still served.
+			// Cache write is best-effort.
 		}
 	}
 	return overview;
@@ -348,9 +325,17 @@ function aggregateOverview(sessions) {
 		addBuckets(totals, session.buckets);
 		for (const day of Object.values(session.byDay ?? {})) {
 			let bucket = days.get(day.day);
-			if (bucket === undefined) days.set(day.day, bucket = { day: day.day, ...zeroBuckets(), steps: 0 });
+			if (bucket === undefined) days.set(day.day, bucket = { day: day.day, ...zeroBuckets(), steps: 0, byModel: {} });
 			addBuckets(bucket, day);
 			bucket.steps += day.steps;
+			// Merge per-day-per-model
+			const dayModels = session.dayModels?.[day.day];
+			if (dayModels !== undefined) {
+				for (const [model, modelBuckets] of Object.entries(dayModels)) {
+					if (bucket.byModel[model] === undefined) bucket.byModel[model] = zeroBuckets();
+					addBuckets(bucket.byModel[model], modelBuckets);
+				}
+			}
 		}
 		for (const model of Object.values(session.byModel ?? {})) {
 			let bucket = models.get(model.model);
@@ -373,14 +358,50 @@ function aggregateOverview(sessions) {
 			.map((s) => ({
 				id: s.id, title: s.title, cwd: s.cwd, createdAt: s.createdAt,
 				firstTs: s.firstTs, lastTs: s.lastTs, steps: s.steps,
-				buckets: s.buckets,
+				buckets: s.buckets, byModel: s.byModel,
 			})),
 	};
 }
 
-/** Total tokens across the four buckets for one model aggregate. */
 function modelTotal(entry) {
 	return entry.input + entry.cacheRead + entry.cacheWrite + entry.output;
+}
+
+// ────────────────────────────────────────────────────────────────
+// OpenCode usage proxy (best-effort, 5-min cache)
+// ────────────────────────────────────────────────────────────────
+
+let opencodeCache = { data: null, ts: 0 };
+const OPENCODE_TTL_MS = 5 * 60 * 1000;
+
+async function fetchOpenCodeUsage(home) {
+	if (Date.now() - opencodeCache.ts < OPENCODE_TTL_MS && opencodeCache.data !== null) {
+		return opencodeCache.data;
+	}
+	let key;
+	try {
+		const text = readFileSync(join(home, '.credentials.yaml'), 'utf8');
+		const match = text.match(/OPENCODE_GO_API_KEY:\s*(.+)/);
+		if (match) key = match[1].trim();
+	} catch {}
+	if (!key) return null;
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), 5000);
+	try {
+		const response = await fetch('https://opencode.ai/zen/go/v1/usage', {
+			headers: { Authorization: `Bearer ${key}` },
+			signal: controller.signal,
+		});
+		clearTimeout(timer);
+		if (!response.ok) return null;
+		const body = await response.json();
+		const usage = body?.usage ?? body;
+		opencodeCache = { data: usage, ts: Date.now() };
+		return usage;
+	} catch {
+		clearTimeout(timer);
+		return null;
+	}
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -390,7 +411,7 @@ function modelTotal(entry) {
 export function apply(ctx) {
 	const home = dshHome();
 	const cacheFile = join(home, 'storages', 'token-dashboard', 'cache.json');
-	const handler = (req, res) => {
+	const handler = async (req, res) => {
 		if (req.method !== 'GET' && req.method !== 'HEAD') {
 			res.writeHead(405, { 'content-type': 'application/json' });
 			res.end(JSON.stringify({ ok: false, error: { code: 'method-not-allowed', message: 'GET only' } }));
@@ -398,6 +419,7 @@ export function apply(ctx) {
 		}
 		try {
 			const overview = buildOverview(home, cacheFile);
+			overview.opencodeUsage = await fetchOpenCodeUsage(home);
 			res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
 			res.end(JSON.stringify({ ok: true, value: overview }));
 		} catch (error) {
