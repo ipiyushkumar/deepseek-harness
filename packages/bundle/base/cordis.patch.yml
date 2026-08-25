@@ -411,6 +411,12 @@
       config:
         apiKeyEnv: DEEPSEEK_API_KEY
 
+    # Exa registers as a second search backend; the seam's `searchProvider`
+    # config picks the active one, so mounting it here changes nothing until a
+    # later layer (home patch or overlay) selects `searchProvider: exa`.
+    - id: web-search-exa
+      name: '@deepseek-ai/dsh-web-search-exa'
+
     - id: tool-web
       name: '@deepseek-ai/dsh-tool-web'
       config:
